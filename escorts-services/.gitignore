@@ -1,0 +1,8 @@
+/vendor/
+/storage/*.sqlite
+/storage/*.sqlite-*
+/storage/profile-photos/
+/storage/qr/
+/.env
+/.env.*
+!/.env.example
