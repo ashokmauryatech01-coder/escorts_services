@@ -8,13 +8,37 @@ $isAdmin = !empty($_SESSION['admin_id']);
 $setupRequired = !app_admin_exists();
 $companions = [];
 $patrons = [];
+$agentApplications = [];
 $patronPhotos = [];
 $bookings = [];
 $payments = [];
-$stats = ['companions' => 0, 'patrons' => 0, 'bookings' => 0, 'pending' => 0, 'payments' => 0];
+$stats = ['companions' => 0, 'patrons' => 0, 'bookings' => 0, 'pending' => 0, 'payments' => 0, 'agent_apps' => 0];
+$upiSettings = null;
+$upiConfig = null;
+$upiFormId = '';
+$upiFormPayee = '';
+$upiStatusLabel = 'Not configured';
 if ($isAdmin) {
+    $upiSettings = $db->query('SELECT upi_id, payee, enabled, updated_at FROM upi_settings WHERE id = 1')->fetch() ?: null;
+    $upiConfig = app_upi_config();
+    if ($upiSettings) {
+        if ((int) $upiSettings['enabled']) {
+            $upiFormId = $upiSettings['upi_id'];
+            $upiFormPayee = $upiSettings['payee'];
+            $upiStatusLabel = 'Admin settings';
+        } else {
+            $upiStatusLabel = 'Disabled by coordinator';
+        }
+    } elseif ($upiConfig && empty($upiConfig['demo'])) {
+        $upiFormId = $upiConfig['upi_id'];
+        $upiFormPayee = $upiConfig['payee'];
+        $upiStatusLabel = 'Server environment';
+    } elseif ($upiConfig && !empty($upiConfig['demo'])) {
+        $upiStatusLabel = 'Demo payee';
+    }
     $companions = $db->query('SELECT * FROM companions ORDER BY id DESC')->fetchAll();
     $patrons = $db->query('SELECT * FROM patrons ORDER BY created_at DESC')->fetchAll();
+    $agentApplications = $db->query('SELECT * FROM agent_applications ORDER BY CASE status WHEN \'Pending\' THEN 0 ELSE 1 END, id DESC')->fetchAll();
     $patronPhotos = $db->query(
         'SELECT id, patron_id FROM patron_photos ORDER BY patron_id, sort_order'
     )->fetchAll();
@@ -38,6 +62,7 @@ if ($isAdmin) {
         'bookings' => (int) $db->query('SELECT COUNT(*) FROM bookings')->fetchColumn(),
         'pending' => (int) $db->query("SELECT COUNT(*) FROM bookings WHERE status = 'Pending'")->fetchColumn(),
         'payments' => (int) $db->query("SELECT COUNT(*) FROM membership_payments WHERE status = 'Submitted'")->fetchColumn(),
+        'agent_apps' => (int) $db->query("SELECT COUNT(*) FROM agent_applications WHERE status = 'Pending'")->fetchColumn(),
     ];
 }
 ?>
@@ -80,9 +105,11 @@ if (!$isAdmin): ?>
     <a class="brand" href="admin.php"><span class="brand-mark" aria-hidden="true">V</span><span class="brand-text"><span class="brand-name">Velvet &amp; Gold</span><span class="brand-sub">Coordinator console</span></span></a>
     <nav class="ad-nav" data-spy aria-label="Console sections">
       <a href="#overview" class="on">Overview</a>
+      <a href="#upiSettings">UPI settings</a>
       <a href="#payments">Payments <span class="pip <?= $stats['payments'] ? '' : 'zero' ?>"><?= $stats['payments'] ?></span></a>
       <a href="#bookings">Requests <span class="pip <?= $stats['pending'] ? '' : 'zero' ?>" id="requestBadge"><?= $stats['pending'] ?></span></a>
       <a href="#members">Members <span class="pip zero"><?= $stats['patrons'] ?></span></a>
+      <a href="#agentApplications">Agent applications <span class="pip <?= $stats['agent_apps'] ? '' : 'zero' ?>" id="agentAppBadge"><?= $stats['agent_apps'] ?></span></a>
       <a href="#roster">Roster <span class="pip zero"><?= count($companions) ?></span></a>
     </nav>
     <div class="ad-user">
@@ -101,6 +128,22 @@ if (!$isAdmin): ?>
       <div class="stat"><strong><?= $stats['patrons'] ?></strong><span>Members</span></div>
       <div class="stat<?= $stats['payments'] ? ' alert' : '' ?>"><strong><?= $stats['payments'] ?></strong><span>Payments to verify</span></div>
     </div>
+
+    <section class="ad-panel" id="upiSettings" aria-labelledby="upiSettingsTitle">
+      <div class="hd"><h2 id="upiSettingsTitle">UPI payment details</h2><span class="badge <?= $upiConfig ? 'ok' : 'warn' ?>"><?= app_escape($upiStatusLabel) ?></span></div>
+      <p class="notice" style="margin-bottom:1rem">These details are shown on member and agent payment pages. Agent payments use them after application approval. Verify every submitted transaction in the merchant account before approving it.</p>
+      <?php if ($upiConfig): ?>
+        <dl class="dl" style="margin-bottom:1rem"><div><dt>Payee shown to customers</dt><dd><?= app_escape($upiConfig['payee']) ?></dd></div><div><dt>UPI ID shown to customers</dt><dd><?= app_escape($upiConfig['upi_id']) ?></dd></div></dl>
+      <?php else: ?>
+        <p class="muted" style="margin-bottom:1rem">UPI payment is currently disabled. Add valid details below to enable payments.</p>
+      <?php endif; ?>
+      <form id="upiSettingsForm" class="form-grid">
+        <div class="field"><label for="upiPayee">Payee name</label><input id="upiPayee" name="payee" required maxlength="50" value="<?= app_escape($upiFormPayee) ?>" autocomplete="off"></div>
+        <div class="field"><label for="upiId">UPI ID</label><input id="upiId" name="upi_id" required maxlength="130" value="<?= app_escape($upiFormId) ?>" placeholder="name@bank" autocomplete="off"></div>
+        <div class="field span2 tbl-tools"><button class="btn btn-gold" type="submit">Save UPI details</button><button class="btn" id="disableUpi" type="button">Disable UPI</button><?php if ($upiSettings): ?><button class="btn" id="resetUpi" type="button">Remove saved settings</button><?php endif; ?></div>
+      </form>
+      <p class="hint" style="margin-top:.6rem">Remove saved settings returns to the server environment values. If none are configured, payments turn off (or use the fake payee in demo mode).</p>
+    </section>
 
     <section class="ad-panel" id="payments" aria-labelledby="payTitle">
       <div class="hd"><h2 id="payTitle">UPI membership payments</h2></div>
@@ -191,6 +234,31 @@ if (!$isAdmin): ?>
       <?php endif; ?>
     </section>
 
+    <section class="ad-panel" id="agentApplications" aria-labelledby="agentApplicationsTitle">
+      <div class="hd"><h2 id="agentApplicationsTitle">Agent applications</h2></div>
+      <p class="notice" style="margin-bottom:1rem">Review the proposed profile. Approval lets the agent pay the selected one-time UPI subscription. Verify the payment before the profile is published in the directory.</p>
+      <?php if (!$agentApplications): ?><div class="empty"><strong>No agent applications yet</strong>New applications will appear here.</div><?php else: ?>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Applicant</th><th>Proposed profile</th><th>Subscription</th><th>Rates</th><th>Location</th><th>Status</th><th>Review</th></tr></thead><tbody>
+        <?php foreach ($agentApplications as $application): ?>
+        <tr>
+          <td data-label="Applicant"><div><?= app_escape($application['name']) ?><span class="sub"><?= app_escape($application['email']) ?> · <?= app_escape($application['phone']) ?></span><span class="sub">Applied <?= app_escape($application['created_at']) ?></span></div></td>
+          <td data-label="Proposed profile"><div><strong><?= app_escape($application['title']) ?></strong><span class="sub"><?= app_escape($application['category']) ?></span><span class="sub"><?= app_escape($application['description']) ?></span></div></td>
+          <td data-label="Subscription"><div><?= app_escape($application['plan'] ?? '—') ?><span class="sub"><?= $application['amount_paise'] ? '₹' . number_format((int) $application['amount_paise'] / 100) : '—' ?> · one-time</span></div></td>
+          <td data-label="Rates"><div><?= app_escape($application['rate']) ?><span class="sub"><?= app_escape($application['overnight']) ?> overnight</span></div></td>
+          <td data-label="Location"><?= app_escape($application['location']) ?><br><a href="<?= app_escape($application['photo']) ?>" target="_blank" rel="noopener">View photo</a></td>
+          <td data-label="Status"><span class="badge <?= $application['status'] === 'Approved' ? 'ok' : ($application['status'] === 'Declined' ? 'bad' : 'warn') ?>"><?= app_escape($application['status']) ?></span><span class="sub">Payment: <?= app_escape($application['payment_status']) ?></span><?php if ($application['utr']): ?><span class="sub mono-ref">UTR: <?= app_escape($application['utr']) ?></span><?php endif; ?></td>
+          <td data-label="Review">
+            <?php if ($application['status'] === 'Pending'): ?><form class="agent-review-form tbl-tools"><input type="hidden" name="id" value="<?= (int) $application['id'] ?>"><select name="status" aria-label="Application decision"><option value="Approved">Approve application</option><option value="Declined">Decline</option></select><button class="btn btn-gold btn-sm" type="submit">Save</button></form>
+            <?php elseif ($application['status'] === 'Approved' && $application['payment_status'] === 'Submitted'): ?><form class="agent-payment-review-form tbl-tools"><input type="hidden" name="id" value="<?= (int) $application['id'] ?>"><select name="status" aria-label="Subscription payment decision"><option value="Verified">Verify UPI payment</option><option value="Rejected">Reject reference</option></select><button class="btn btn-gold btn-sm" type="submit">Save</button></form>
+            <?php elseif ($application['companion_id']): ?><span class="faint">Published</span>
+            <?php else: ?><span class="faint">Awaiting agent</span><?php endif; ?>
+          </td>
+        </tr>
+        <?php endforeach; ?>
+      </tbody></table></div>
+      <?php endif; ?>
+    </section>
+
     <section class="ad-panel" id="roster" aria-labelledby="rsTitle">
       <div class="hd"><h2 id="rsTitle">Companion profiles</h2><button class="btn btn-gold btn-sm" id="newCompanion" type="button">+ Add profile</button></div>
       <?php if (!$companions): ?><div class="empty"><strong>No profiles yet</strong>Add the first profile to publish it in the directory.</div><?php else: ?>
@@ -236,6 +304,12 @@ if (!$isAdmin): ?>
 <script src="assets/js/vg.js?v=1"></script>
 <script>
 const {api,toast}=window.VG;
+const upiSettingsForm=document.querySelector('#upiSettingsForm');
+if(upiSettingsForm)upiSettingsForm.addEventListener('submit',async event=>{event.preventDefault();if(!upiSettingsForm.reportValidity())return;const values=Object.fromEntries(new FormData(upiSettingsForm));try{await api({action:'admin-upi-save',...values});location.reload();}catch(error){toast(error.message,true);}});
+const disableUpi=document.querySelector('#disableUpi');
+if(disableUpi)disableUpi.addEventListener('click',async()=>{if(!confirm('Disable UPI payments for members and agents?'))return;try{await api({action:'admin-upi-disable'});location.reload();}catch(error){toast(error.message,true);}});
+const resetUpi=document.querySelector('#resetUpi');
+if(resetUpi)resetUpi.addEventListener('click',async()=>{if(!confirm('Remove saved UPI settings and use the server environment values?'))return;try{await api({action:'admin-upi-reset'});location.reload();}catch(error){toast(error.message,true);}});
 const authForm=document.querySelector('#authForm');
 if(authForm)authForm.addEventListener('submit',async event=>{event.preventDefault();const form=new FormData(authForm);try{await api({action:'login',username:form.get('username'),password:form.get('password')});location.reload();}catch(error){toast(error.message,true);}});
 const agentModal=document.querySelector('#agentProfileModal');
@@ -265,12 +339,13 @@ if(agentModal){
 }
 const bookingTotalEl=document.querySelector('#bookingTotal'),pendingTotalEl=document.querySelector('#pendingTotal');
 if(bookingTotalEl&&pendingTotalEl){
- let knownTotal=Number(bookingTotalEl.textContent),knownPending=Number(pendingTotalEl.textContent),refreshing=false;
+ let knownTotal=Number(bookingTotalEl.textContent),knownPending=Number(pendingTotalEl.textContent),knownAgentApps=Number(document.querySelector('#agentAppBadge')?.textContent||0),refreshing=false;
  const pollRequests=async()=>{
   if(refreshing)return;
   try{
    const data=await api({action:'admin-bookings-list'});
    if(data.total!==knownTotal){refreshing=true;document.querySelector('#bookingLiveStatus').textContent='New request received. Updating…';setTimeout(()=>location.reload(),700);return;}
+   if(data.agentApplications!==knownAgentApps){refreshing=true;document.querySelector('#bookingLiveStatus').textContent='New agent application received. Updating…';setTimeout(()=>location.reload(),700);return;}
    if(data.pending!==knownPending){knownPending=data.pending;pendingTotalEl.textContent=data.pending;const stat=document.querySelector('#pendingStat'),badge=document.querySelector('#requestBadge');stat.classList.toggle('alert',data.pending>0);badge.textContent=data.pending;badge.classList.toggle('zero',data.pending===0);}
   }catch(error){/* Keep the console usable if a poll briefly fails. */}
  };
@@ -296,6 +371,8 @@ if(profileForm){
  const ms=document.querySelector('#memberSearch'),mt=document.querySelector('#memberTable');
  if(ms&&mt)ms.addEventListener('input',()=>{const t=ms.value.trim().toLowerCase();mt.querySelectorAll('tbody tr').forEach(r=>{r.hidden=t&&!r.textContent.toLowerCase().includes(t);});});
 }
+document.querySelectorAll('.agent-review-form').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(form));try{await api({action:'admin-agent-application-review',...values});location.reload();}catch(error){toast(error.message,true);}}));
+document.querySelectorAll('.agent-payment-review-form').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(form));try{await api({action:'admin-agent-payment-review',...values});location.reload();}catch(error){toast(error.message,true);}}));
 </script>
 </body>
 </html>

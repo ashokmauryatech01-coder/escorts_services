@@ -71,6 +71,22 @@ function app_db(): PDO
             sort_order INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS agent_applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            rate TEXT NOT NULL,
+            overnight TEXT NOT NULL,
+            location TEXT NOT NULL,
+            description TEXT NOT NULL,
+            photo TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT \'Pending\' CHECK (status IN (\'Pending\', \'Approved\', \'Declined\')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS bookings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patron_id TEXT NOT NULL REFERENCES patrons(id) ON DELETE CASCADE,
@@ -99,8 +115,33 @@ function app_db(): PDO
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS upi_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            upi_id TEXT NOT NULL DEFAULT \'\',
+            payee TEXT NOT NULL DEFAULT \'\',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )'
     );
+    $agentColumns = array_column($db->query('PRAGMA table_info(agent_applications)')->fetchAll(), 'name');
+    $agentMigrations = [
+        'password_hash' => 'TEXT',
+        'plan' => 'TEXT',
+        'amount_paise' => 'INTEGER',
+        'payment_ref' => 'TEXT',
+        'utr' => 'TEXT',
+        'payment_status' => "TEXT NOT NULL DEFAULT 'Not Due'",
+        'payment_submitted_at' => 'TEXT',
+        'payment_reviewed_at' => 'TEXT',
+        'companion_id' => 'INTEGER',
+        'active_at' => 'TEXT',
+    ];
+    foreach ($agentMigrations as $column => $type) {
+        if (!in_array($column, $agentColumns, true)) {
+            $db->exec("ALTER TABLE agent_applications ADD COLUMN {$column} {$type}");
+        }
+    }
     $patronColumns = array_column($db->query('PRAGMA table_info(patrons)')->fetchAll(), 'name');
     $profileColumns = [
         'password_hash' => 'TEXT',
@@ -123,6 +164,11 @@ function app_db(): PDO
             $db->exec("ALTER TABLE patrons ADD COLUMN {$column} {$type}");
         }
     }
+
+    $legacyProfilePhoto = 'https://images.unsplash.com/photo-1531123897727-8f129e1688ce?auto=format&fit=crop&w=800&q=80';
+    $driveProfilePhoto = 'https://drive.google.com/thumbnail?id=1XkU45-woMLNPnKJrUCocBP3ZRNHGUKbU&sz=w1000';
+    $photoUpdate = $db->prepare('UPDATE companions SET photo = ? WHERE photo = ?');
+    $photoUpdate->execute([$driveProfilePhoto, $legacyProfilePhoto]);
 
     // if ((int) $db->query('SELECT COUNT(*) FROM companions')->fetchColumn() === 0) {
     //     $seed = $db->prepare(
@@ -245,7 +291,7 @@ function app_db(): PDO
             'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=800&q=80',
             'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=800&q=80',
             'https://images.unsplash.com/photo-1529139574466-a303027c1d8b?auto=format&fit=crop&w=800&q=80',
-            'https://images.unsplash.com/photo-1531123897727-8f129e1688ce?auto=format&fit=crop&w=800&q=80',
+            'https://drive.google.com/thumbnail?id=1XkU45-woMLNPnKJrUCocBP3ZRNHGUKbU&sz=w1000',
             'https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?auto=format&fit=crop&w=800&q=80',
             'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=800&q=80',
             'https://images.unsplash.com/photo-1524250502761-1ac6f2e30d43?auto=format&fit=crop&w=800&q=80'
@@ -376,17 +422,22 @@ function app_require_admin(): void
 
 function app_upi_config(): ?array
 {
-   
-    // $upiId = trim((string) (getenv('APP_UPI_ID') ?: ''));
-    // $payee = trim((string) (getenv('APP_UPI_PAYEE') ?: ''));
-    $upiId = trim((string) ('9074638861@YBL' ?: ''));
-    $payee = trim((string) ('TEJPAL JAT' ?: ''));
-   //  echo 'ddddddddddddddddddddd'; die($upiId);
+    $stored = app_db()->query('SELECT upi_id, payee, enabled FROM upi_settings WHERE id = 1')->fetch();
+    if ($stored) {
+        if (!(int) $stored['enabled']) {
+            return null;
+        }
+        $upiId = trim((string) $stored['upi_id']);
+        $payee = trim((string) $stored['payee']);
+    } else {
+        $upiId = trim((string) (getenv('APP_UPI_ID') ?: ''));
+        $payee = trim((string) (getenv('APP_UPI_PAYEE') ?: ''));
+    }
     if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{1,63}@[A-Za-z0-9][A-Za-z0-9.-]{1,63}$/', $upiId)
         || $payee === '' || mb_strlen($payee) > 50) {
         // Opt-in demo mode (APP_UPI_DEMO=1): a clearly fake payee on a handle that
         // no UPI app can resolve, so the QR flow can be previewed without real money.
-        if (getenv('APP_UPI_DEMO') === '1') {
+        if (!$stored && getenv('APP_UPI_DEMO') === '1') {
             return ['upi_id' => 'demo.merchant@example', 'payee' => 'Velvet & Gold (DEMO)', 'demo' => true];
         }
         return null;
@@ -416,13 +467,34 @@ function app_membership_prices(): array
     return $defaults;
 }
 
-function app_upi_intent(array $upi, string $reference, int $amountPaise): string
+function app_agent_plans(): array
+{
+    $plans = [
+        'Young Unmarried' => 2500,
+        'Married' => 4500,
+        'Mature' => 6500,
+    ];
+    $environmentNames = [
+        'Young Unmarried' => 'APP_AGENT_PRICE_YOUNG_UNMARRIED',
+        'Married' => 'APP_AGENT_PRICE_MARRIED',
+        'Mature' => 'APP_AGENT_PRICE_MATURE',
+    ];
+    foreach ($environmentNames as $plan => $name) {
+        $configured = getenv($name);
+        if ($configured !== false && preg_match('/^[1-9]\d{0,6}$/', $configured)) {
+            $plans[$plan] = (int) $configured;
+        }
+    }
+    return $plans;
+}
+
+function app_upi_intent(array $upi, string $reference, int $amountPaise, string $purpose = 'membership'): string
 {
     $query = http_build_query([
         'pa' => $upi['upi_id'],
         'pn' => $upi['payee'],
         'tr' => $reference,
-        'tn' => 'Velvet Gold membership ' . $reference,
+        'tn' => 'Velvet Gold ' . $purpose . ' ' . $reference,
         'am' => number_format($amountPaise / 100, 2, '.', ''),
         'cu' => 'INR',
     ], '', '&', PHP_QUERY_RFC3986);

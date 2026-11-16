@@ -31,7 +31,11 @@ Signup can optionally collect private profile details and up to three JPEG, PNG,
 
 Set `APP_UPI_ID` to the real merchant VPA and `APP_UPI_PAYEE` to the displayed payee name in the PHP server environment. UPI is disabled unless both values are configured and valid. Existing membership prices are ₹1,499 / ₹4,999 / ₹12,500; optional server overrides are `APP_PRICE_VELVET_PASS`, `APP_PRICE_GOLD_RESERVE`, and `APP_PRICE_ELITE_VIP` (whole rupees).
 
+Coordinators can also add or change the active payee and UPI ID in the admin console under **UPI payment details**. Saved admin settings override the server environment values; removing saved settings returns to the environment configuration. Disabling UPI turns off payment pages until it is enabled again.
+
 After signup review, members are taken to `payment.php`, which displays their local UPI QR and exact membership amount. The site records the member-submitted UPI transaction reference (UTR) and leaves the payment pending. The coordinator must verify the amount and transaction in the merchant bank/UPI account before marking it verified in the admin console. A QR scan, UPI app return, or user-submitted UTR is not proof of receipt; this implementation does not have a bank/payment-provider webhook and never auto-verifies payments.
+
+Agent applications are submitted through `agent-register.php`. The coordinator reviews the application first; if approved, the agent pays the selected one-time plan by UPI and submits the UTR from `agent-account.php`. The profile is published only after manual payment verification. Default one-time agent prices are ₹2,500 (Young Unmarried), ₹4,500 (Married), and ₹6,500 (Mature). Optional overrides are `APP_AGENT_PRICE_YOUNG_UNMARRIED`, `APP_AGENT_PRICE_MARRIED`, and `APP_AGENT_PRICE_MATURE`. Recurring billing is not implemented.
 
 ## Demo UPI QR (no real payee)
 
@@ -41,5 +45,5 @@ To preview the payment flow without a merchant account, run `./run-demo.sh` (set
 
 - `assets/css/vg.css`, `assets/js/vg.js`: shared design system and behaviour.
 - `inc/layout.php`: shared header, footer, age gate and card/modal partials.
-- Pages: `index.php`, `directory.php`, `listing.php?id=`, `membership.php`, `register.php`, `login.php`, `dashboard.php`, `payment.php`, `admin.php`.
+- Pages: `index.php`, `directory.php`, `listing.php?id=`, `membership.php`, `register.php`, `agent-register.php`, `agent-login.php`, `agent-account.php`, `login.php`, `dashboard.php`, `payment.php`, `admin.php`.
 - `logout.php`: member sign-out. `api.php`'s `logout` action only clears the coordinator session.

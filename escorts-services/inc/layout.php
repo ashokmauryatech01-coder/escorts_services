@@ -96,10 +96,13 @@ function vg_head(array $o): void
     <nav class="nav-links" id="navLinks" aria-label="Main">
       <?= $link('directory', 'directory.php', 'Directory') ?>
       <?= $link('membership', 'membership.php', 'Membership') ?>
+      <?= $link('agent', 'agent-register.php', 'Become an agent') ?>
       <?= $link('how', 'index.php#how', 'How it works') ?>
       <?php if ($patron): ?>
         <?= $link('dashboard', 'dashboard.php', 'My lounge') ?>
         <a class="btn btn-gold" href="dashboard.php"><?= app_escape(vg_initial($patron['name'])) ?> · Dashboard</a>
+      <?php elseif (!empty($_SESSION['agent_application_id'])): ?>
+        <a class="btn btn-gold" href="agent-account.php">Agent application</a>
       <?php else: ?>
         <?= $link('login', 'login.php', 'Sign in') ?>
         <a class="btn btn-gold" href="register.php">Become a member</a>
@@ -129,7 +132,7 @@ function vg_foot(array $o = []): void
       </div>
       <div>
         <h4>Account</h4>
-        <ul><li><a href="register.php">Become a member</a></li><li><a href="dashboard.php">My lounge</a></li><li><a href="login.php">Sign in</a></li><li><a href="admin.php">Coordinator console</a></li></ul>
+        <ul><li><a href="register.php">Become a member</a></li><li><a href="agent-register.php">Become an agent</a></li><li><a href="dashboard.php">My lounge</a></li><li><a href="login.php">Sign in</a></li><li><a href="admin.php">Coordinator console</a></li></ul>
       </div>
     </div>
     <div class="foot-base"><span>© <?= date('Y') ?> Velvet &amp; Gold. Adults 18+ only.</span><span>Profiles and payments are reviewed by a person.</span></div>

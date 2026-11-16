@@ -23,6 +23,71 @@ $action = (string) ($input['action'] ?? '');
 $db = app_db();
 
 try {
+    if ($action === 'agent-apply') {
+        $name = trim((string) ($input['name'] ?? ''));
+        $email = filter_var(trim((string) ($input['email'] ?? '')), FILTER_VALIDATE_EMAIL);
+        $phone = trim((string) ($input['phone'] ?? ''));
+        $plan = trim((string) ($input['plan'] ?? ''));
+        $password = (string) ($input['password'] ?? '');
+        $passwordConfirm = (string) ($input['password_confirm'] ?? '');
+        $fields = [
+            'title' => trim((string) ($input['title'] ?? '')),
+            'category' => trim((string) ($input['category'] ?? '')),
+            'rate' => trim((string) ($input['rate'] ?? '')),
+            'overnight' => trim((string) ($input['overnight'] ?? '')),
+            'location' => trim((string) ($input['location'] ?? '')),
+            'description' => trim((string) ($input['description'] ?? '')),
+            'photo' => trim((string) ($input['photo'] ?? '')),
+        ];
+        $limits = ['title' => 200, 'category' => 100, 'rate' => 100, 'overnight' => 100, 'location' => 160, 'description' => 500, 'photo' => 500];
+        if ($name === '' || mb_strlen($name) > 100 || !$email || $phone === '' || mb_strlen($phone) > 40) {
+            app_json(['error' => 'Enter a display name, valid email address, and phone number.'], 422);
+        }
+        $plans = app_agent_plans();
+        if (!array_key_exists($plan, $plans)) {
+            app_json(['error' => 'Choose one of the available agent plans.'], 422);
+        }
+        if (strlen($password) < 10 || strlen($password) > 128 || $password !== $passwordConfirm) {
+            app_json(['error' => 'Use a matching password of 10 to 128 characters.'], 422);
+        }
+        foreach ($fields as $field => $value) {
+            $max = $limits[$field];
+            if ($value === '' || mb_strlen($value) > $max) {
+                app_json(['error' => 'Complete the ' . str_replace('_', ' ', $field) . ' field (maximum ' . $max . ' characters).'], 422);
+            }
+        }
+        if (!filter_var($fields['photo'], FILTER_VALIDATE_URL) || parse_url($fields['photo'], PHP_URL_SCHEME) !== 'https') {
+            app_json(['error' => 'Enter a valid HTTPS image URL for your profile photo.'], 422);
+        }
+        if (($input['adult_confirm'] ?? '') !== '1') {
+            app_json(['error' => 'Confirm that you are at least 18 years old.'], 422);
+        }
+        $duplicate = $db->prepare('SELECT id, password_hash, plan FROM agent_applications WHERE lower(email) = lower(?) AND status = \'Pending\' ORDER BY id DESC LIMIT 1');
+        $duplicate->execute([$email]);
+        $existingApplication = $duplicate->fetch();
+        if ($existingApplication && !empty($existingApplication['password_hash']) && !empty($existingApplication['plan'])) {
+            app_json(['error' => 'An application for this email is already awaiting review.'], 409);
+        }
+        $values = [$name, $email, $phone, password_hash($password, PASSWORD_DEFAULT), $plan, $plans[$plan] * 100, $fields['title'], $fields['category'], $fields['rate'], $fields['overnight'], $fields['location'], $fields['description'], $fields['photo']];
+        if ($existingApplication) {
+            $update = $db->prepare(
+                'UPDATE agent_applications SET name=?, email=?, phone=?, password_hash=?, plan=?, amount_paise=?, title=?, category=?, rate=?, overnight=?, location=?, description=?, photo=? WHERE id=?'
+            );
+            $update->execute([...$values, (int) $existingApplication['id']]);
+            $applicationId = (int) $existingApplication['id'];
+        } else {
+            $insert = $db->prepare(
+                'INSERT INTO agent_applications (name, email, phone, password_hash, plan, amount_paise, title, category, rate, overnight, location, description, photo)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            );
+            $insert->execute($values);
+            $applicationId = (int) $db->lastInsertId();
+        }
+        session_regenerate_id(true);
+        $_SESSION['agent_application_id'] = $applicationId;
+        app_json(['ok' => true, 'message' => 'Application received. The coordinator will review it. If approved, you can pay the one-time subscription by UPI and submit the transaction reference for verification.']);
+    }
+
     if ($action === 'register') {
         $name = trim((string) ($input['name'] ?? ''));
         $email = filter_var(trim((string) ($input['email'] ?? '')), FILTER_VALIDATE_EMAIL);
@@ -330,6 +395,43 @@ try {
         app_json(['ok' => true, 'member' => ['name' => $member['name']]]);
     }
 
+    if ($action === 'agent-login') {
+        $email = filter_var(trim((string) ($input['email'] ?? '')), FILTER_VALIDATE_EMAIL);
+        $password = (string) ($input['password'] ?? '');
+        $stmt = $db->prepare('SELECT id, name, password_hash FROM agent_applications WHERE lower(email) = lower(?) AND password_hash IS NOT NULL ORDER BY id DESC LIMIT 1');
+        $stmt->execute([$email ?: '']);
+        $agent = $stmt->fetch();
+        if (!$agent || !password_verify($password, $agent['password_hash'])) {
+            app_json(['error' => 'Incorrect email or password.'], 401);
+        }
+        session_regenerate_id(true);
+        $_SESSION['agent_application_id'] = (int) $agent['id'];
+        app_json(['ok' => true]);
+    }
+
+    if ($action === 'agent-payment-submit') {
+        $agentId = filter_var($_SESSION['agent_application_id'] ?? null, FILTER_VALIDATE_INT);
+        $reference = trim((string) ($input['payment_ref'] ?? ''));
+        $utr = strtoupper(trim((string) ($input['utr'] ?? '')));
+        if (!$agentId || !preg_match('/^AG[A-F0-9]{16}$/', $reference) || !preg_match('/^[A-Z0-9-]{6,30}$/', $utr)) {
+            app_json(['error' => 'Enter the UPI reference shown on this page.'], 422);
+        }
+        $query = $db->prepare('SELECT payment_status, payment_ref FROM agent_applications WHERE id = ? AND status = \'Approved\'');
+        $query->execute([$agentId]);
+        $agent = $query->fetch();
+        if (!$agent || !hash_equals((string) $agent['payment_ref'], $reference) || !in_array($agent['payment_status'], ['Awaiting Payment', 'Rejected'], true)) {
+            app_json(['error' => 'This agent payment cannot be updated. Refresh and check your application status.'], 409);
+        }
+        $duplicate = $db->prepare('SELECT 1 FROM membership_payments WHERE utr = ? UNION SELECT 1 FROM agent_applications WHERE utr = ? AND id <> ? LIMIT 1');
+        $duplicate->execute([$utr, $utr, $agentId]);
+        if ($duplicate->fetchColumn()) {
+            app_json(['error' => 'This UPI reference has already been submitted.'], 409);
+        }
+        $update = $db->prepare('UPDATE agent_applications SET utr = ?, payment_status = \'Submitted\', payment_submitted_at = CURRENT_TIMESTAMP, payment_reviewed_at = NULL WHERE id = ?');
+        $update->execute([$utr, $agentId]);
+        app_json(['ok' => true, 'message' => 'Payment reference submitted for coordinator verification.']);
+    }
+
     if (in_array($action, ['login', 'admin-login'], true)) {
         $username = trim((string) ($input['username'] ?? ''));
         $password = (string) ($input['password'] ?? '');
@@ -352,8 +454,47 @@ try {
         app_json(['ok' => true]);
     }
 
+    if ($action === 'agent-logout') {
+        if (empty($_SESSION['agent_application_id'])) {
+            app_json(['error' => 'No agent session is active.'], 401);
+        }
+        unset($_SESSION['agent_application_id']);
+        session_regenerate_id(true);
+        app_json(['ok' => true]);
+    }
+
     if (str_starts_with($action, 'admin-')) {
         app_require_admin();
+    }
+
+    if ($action === 'admin-upi-save') {
+        $upiId = trim((string) ($input['upi_id'] ?? ''));
+        $payee = trim((string) ($input['payee'] ?? ''));
+        if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{1,63}@[A-Za-z0-9][A-Za-z0-9.-]{1,63}$/', $upiId)) {
+            app_json(['error' => 'Enter a valid UPI ID, for example name@bank.'], 422);
+        }
+        if ($payee === '' || mb_strlen($payee) > 50) {
+            app_json(['error' => 'Enter a payee name of 1 to 50 characters.'], 422);
+        }
+        $stmt = $db->prepare(
+            'INSERT INTO upi_settings (id, upi_id, payee, enabled, updated_at) VALUES (1, ?, ?, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET upi_id = excluded.upi_id, payee = excluded.payee, enabled = 1, updated_at = CURRENT_TIMESTAMP'
+        );
+        $stmt->execute([$upiId, $payee]);
+        app_json(['ok' => true, 'message' => 'UPI details saved. New payment pages will use these details.']);
+    }
+
+    if ($action === 'admin-upi-disable') {
+        $db->exec(
+            "INSERT INTO upi_settings (id, upi_id, payee, enabled, updated_at) VALUES (1, '', '', 0, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET enabled = 0, updated_at = CURRENT_TIMESTAMP"
+        );
+        app_json(['ok' => true, 'message' => 'UPI payments disabled.']);
+    }
+
+    if ($action === 'admin-upi-reset') {
+        $db->exec('DELETE FROM upi_settings WHERE id = 1');
+        app_json(['ok' => true, 'message' => 'Saved UPI settings removed. The app will use server environment settings.']);
     }
 
     if ($action === 'admin-bookings-list') {
@@ -366,7 +507,67 @@ try {
         )->fetchAll();
         $total = (int) $db->query('SELECT COUNT(*) FROM bookings')->fetchColumn();
         $pending = (int) $db->query("SELECT COUNT(*) FROM bookings WHERE status = 'Pending'")->fetchColumn();
-        app_json(['ok' => true, 'bookings' => $rows, 'total' => $total, 'pending' => $pending]);
+        $agentApplications = (int) $db->query("SELECT COUNT(*) FROM agent_applications WHERE status = 'Pending'")->fetchColumn();
+        app_json(['ok' => true, 'bookings' => $rows, 'total' => $total, 'pending' => $pending, 'agentApplications' => $agentApplications]);
+    }
+
+    if ($action === 'admin-agent-application-review') {
+        $id = filter_var($input['id'] ?? null, FILTER_VALIDATE_INT);
+        $status = (string) ($input['status'] ?? '');
+        if (!$id || !in_array($status, ['Approved', 'Declined'], true)) {
+            app_json(['error' => 'Choose approve or decline for this application.'], 422);
+        }
+        $db->beginTransaction();
+        $query = $db->prepare('SELECT * FROM agent_applications WHERE id = ? AND status = \'Pending\'');
+        $query->execute([$id]);
+        $application = $query->fetch();
+        if (!$application) {
+            $db->rollBack();
+            app_json(['error' => 'This application has already been reviewed or no longer exists. Refresh the page.'], 409);
+        }
+        if ($status === 'Approved') {
+            if (empty($application['plan']) || (int) $application['amount_paise'] < 1) {
+                $db->rollBack();
+                app_json(['error' => 'This application has no valid subscription plan. Ask the applicant to submit a new application.'], 409);
+            }
+            $reference = 'AG' . strtoupper(bin2hex(random_bytes(8)));
+            $update = $db->prepare('UPDATE agent_applications SET status = ?, payment_ref = ?, payment_status = \'Awaiting Payment\', reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = \'Pending\'');
+            $update->execute([$status, $reference, $id]);
+        } else {
+            $update = $db->prepare('UPDATE agent_applications SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = \'Pending\'');
+            $update->execute([$status, $id]);
+        }
+        $db->commit();
+        app_json(['ok' => true, 'message' => $status === 'Approved' ? 'Application approved. The agent can now pay the selected subscription.' : 'Application declined.']);
+    }
+
+    if ($action === 'admin-agent-payment-review') {
+        $id = filter_var($input['id'] ?? null, FILTER_VALIDATE_INT);
+        $status = (string) ($input['status'] ?? '');
+        if (!$id || !in_array($status, ['Verified', 'Rejected'], true)) {
+            app_json(['error' => 'Choose whether the agent payment is verified or rejected.'], 422);
+        }
+        $db->beginTransaction();
+        $query = $db->prepare('SELECT * FROM agent_applications WHERE id = ? AND status = \'Approved\' AND payment_status = \'Submitted\'');
+        $query->execute([$id]);
+        $agent = $query->fetch();
+        if (!$agent) {
+            $db->rollBack();
+            app_json(['error' => 'This agent payment has already been reviewed or is not ready. Refresh the page.'], 409);
+        }
+        $companionId = $agent['companion_id'];
+        if ($status === 'Verified' && !$companionId) {
+            $listing = $db->prepare(
+                'INSERT INTO companions (name, title, category, rate, overnight, location, description, badge, photo, active)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
+            );
+            $listing->execute([$agent['name'], $agent['title'], $agent['category'], $agent['rate'], $agent['overnight'], $agent['location'], $agent['description'], 'Subscribed agent', $agent['photo']]);
+            $companionId = (int) $db->lastInsertId();
+        }
+        $update = $db->prepare('UPDATE agent_applications SET payment_status = ?, companion_id = ?, active_at = CASE WHEN ? = \'Verified\' THEN CURRENT_TIMESTAMP ELSE active_at END, payment_reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND payment_status = \'Submitted\'');
+        $update->execute([$status, $companionId, $status, $id]);
+        $db->commit();
+        app_json(['ok' => true, 'message' => $status === 'Verified' ? 'Payment verified and agent profile published.' : 'Payment rejected. The agent can submit a corrected reference.']);
     }
 
     if ($action === 'admin-companion-save') {
